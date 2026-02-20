@@ -1,8 +1,9 @@
-% 事件触发一致性 + ASV 3DOF 动力学模型（固定时间外环版）
+% 事件触发一致性 + ASV 3DOF 动力学模型（固定时间外环-稳态增强版）
 % 说明：
-% 1) 外环采用固定时间一致性结构：u = -k1*sig(z)^alpha - k2*sig(z)^beta, 0<alpha<1<beta
-% 2) 触发机制采用“前疏后密”：阈值随时间下降 + 最大静默间隔随时间收缩
-% 3) 保留输入限幅与执行器动态，避免控制量尖峰
+% 1) 外环采用固定时间项 + 线性阻尼项，抑制振荡：
+%    u = -k0*z - k1*sig(z)^alpha - k2*sig(z)^beta, 0<alpha<1<beta
+% 2) 触发机制采用“前疏后密”并加入滞回 + 动态最小间隔，减少触发抖动
+% 3) 去除统计打印输出，仅保留必要曲线
 
 clear all
 close all
@@ -27,38 +28,43 @@ h = 0.01;
 Ts = 0:h:t;
 K = numel(Ts);
 
-%% 外环固定时间一致性控制
-alpha_ft = 0.60;        % 0<alpha_ft<1
-beta_ft  = 1.40;        % beta_ft>1
-k1_ft = 1.25;           % 低阶幂增益（远离原点快速收敛）
-k2_ft = 0.95;           % 高阶幂增益（近原点强收敛）
-u_lim = 1.8;            % 外环速度参考限幅
+%% 外环固定时间一致性控制（稳态增强）
+alpha_ft = 0.72;        % 0<alpha_ft<1
+beta_ft  = 1.28;        % beta_ft>1
+k0_ft = 0.62;           % 线性阻尼项
+k1_ft = 0.78;           % 低阶幂项
+k2_ft = 0.36;           % 高阶幂项
+u_lim = 1.15;           % 外环速度参考限幅（减小峰值）
 
-% 标称固定时间上界（对 s_dot = -k1|s|^alpha - k2|s|^beta 的上界估计）
-T_bound_nom = 1/(k1_ft*(1-alpha_ft)) + 1/(k2_ft*(beta_ft-1));
+Tf_u = 0.10;            % 外环指令滤波时间常数
+alpha_u = h/(Tf_u+h);
+u_filt = zeros(1,N);
 
-%% 触发参数（前疏后密 + 滞回）
-line_hi = 0.18;         % 初期阈值（高）
-line_lo = 8e-4;         % 后期阈值（低）
-lambda_th = 0.85;       % 阈值衰减速率
+%% 触发参数（前疏后密 + 抗抖）
+line_hi = 0.24;         % 初期阈值（高）
+line_lo = 0.003;        % 后期阈值（低）
+lambda_th = 0.55;       % 阈值衰减速率（放慢）
 
-sigma_rel = 0.008;      % 相对项：th_i = sigma_rel*|x_i| + line(t)
-eta_hys  = 0.25;        % 滞回比例
+sigma_rel = 0.012;      % 相对项：th_i = sigma_rel*|x_i| + line(t)
+eta_hys  = 0.30;        % 滞回比例
+z_dead = 0.02;          % 小邻域死区，避免临近一致时误差触发抖动
 
-tau_min = 0.01;         % 最小触发间隔（防抖）
-tau_max_hi = 0.22;      % 初期最大静默时间（大：触发稀）
-tau_max_lo = 0.03;      % 后期最大静默时间（小：触发密）
-lambda_tau = 0.95;      % 最大静默时间收缩速率
+tau_min_hi = 0.10;      % 初期最小触发间隔（大）
+tau_min_lo = 0.04;      % 后期最小触发间隔（小）
+lambda_min = 0.40;      % 最小间隔收缩速率
 
-N_min = max(1,ceil(tau_min/h));
+tau_max_hi = 0.45;      % 初期最大静默时间（大：触发稀）
+tau_max_lo = 0.12;      % 后期最大静默时间（小：触发密）
+lambda_tau = 0.35;      % 最大静默时间收缩速率（放慢）
+
 last_trig = -1e6*ones(1,N);
 armed = true(1,N);
 
 %% ASV内环参数
-k_u_track = 2.9;
-k_r = 3.4;
-k_psi = 2.2;
-k_v = 0.9;
+k_u_track = 2.6;
+k_r = 3.2;
+k_psi = 2.0;
+k_v = 0.75;
 
 %% 数据存储
 x1 = zeros(K,N);
@@ -67,7 +73,6 @@ E = zeros(K,N);
 U = zeros(K,N);
 line1 = zeros(K,1);
 cons_err = zeros(K,1);
-trig_count = zeros(K,1);
 
 T_1=[];T_2=[];T_3=[];T_4=[];T_5=[];T_6=[];
 
@@ -83,21 +88,26 @@ for k = 1:K
     line_1 = line_lo + (line_hi-line_lo)*exp(-lambda_th*G);
     line1(k) = line_1;
 
+    % 动态最小间隔：大->小
+    tau_min_t = tau_min_lo + (tau_min_hi-tau_min_lo)*exp(-lambda_min*G);
+    N_min_t = max(1, ceil(tau_min_t/h));
+
     % 最大静默时间：大->小（前疏后密）
     tau_max_t = tau_max_lo + (tau_max_hi-tau_max_lo)*exp(-lambda_tau*G);
-    N_max_t = max(N_min+1, ceil(tau_max_t/h));
+    N_max_t = max(N_min_t+1, ceil(tau_max_t/h));
 
     % 一致性误差
     cons_err(k) = norm(L*x.',2);
 
     % 外环固定时间一致性控制（使用触发保持值 xhat）
     z = (L*xhat.').';
-    u_raw = -k1_ft*sig_pow(z, alpha_ft) - k2_ft*sig_pow(z, beta_ft);
-    u = u_lim*tanh(u_raw/u_lim);
+    u_raw = -k0_ft*z - k1_ft*sig_pow(z, alpha_ft) - k2_ft*sig_pow(z, beta_ft);
+    u_cmd = u_lim*tanh(u_raw/u_lim);
+    u_filt = (1-alpha_u)*u_filt + alpha_u*u_cmd;
 
     % ASV 3DOF 推进
     for i = 1:N
-        u_ref = u(i);
+        u_ref = u_filt(i);
 
         m11_est = 25.8;
         m33_est = 2.76;
@@ -118,10 +128,9 @@ for k = 1:K
 
     x1(k,:) = x;
     x1hat(k,:) = xhat;
-    U(k,:) = u;
+    U(k,:) = u_filt;
 
-    % 事件触发判据：误差触发 + 超时触发（滞回）
-    trig_k = 0;
+    % 事件触发判据：误差触发 + 超时触发（滞回 + 死区）
     for i = 1:N
         dt = k - last_trig(i);
         th_i = sigma_rel*abs(x(i)) + line_1;
@@ -130,8 +139,9 @@ for k = 1:K
             armed(i) = true;
         end
 
-        can_check = (dt >= N_min);
-        trig_by_err = can_check && armed(i) && (abs(e(i)) >= th_i);
+        can_check = (dt >= N_min_t);
+        near_consensus = abs(z(i)) <= z_dead;
+        trig_by_err = can_check && armed(i) && (~near_consensus) && (abs(e(i)) >= th_i);
         trig_by_timeout = (dt >= N_max_t);
         trig_init = (k == 1);
 
@@ -139,7 +149,6 @@ for k = 1:K
             xhat(i) = x(i);
             last_trig(i) = k;
             armed(i) = false;
-            trig_k = trig_k + 1;
 
             if i==1, T_1=[T_1;k]; end
             if i==2, T_2=[T_2;k]; end
@@ -149,23 +158,6 @@ for k = 1:K
             if i==6, T_6=[T_6;k]; end
         end
     end
-    trig_count(k) = trig_k;
-end
-
-%% 固定时间收敛统计
-eps_cons = 5e-2;
-idx_ft = find(cons_err <= eps_cons, 1, 'first');
-if isempty(idx_ft)
-    t_ft = NaN;
-else
-    t_ft = Ts(idx_ft);
-end
-
-fprintf('Nominal fixed-time upper bound (outer-loop scalar): %.4f s\n', T_bound_nom);
-if isnan(t_ft)
-    fprintf('Consensus error did not enter %.3g within %.2f s.\n', eps_cons, t);
-else
-    fprintf('Consensus error <= %.3g at t = %.4f s\n', eps_cons, t_ft);
 end
 
 %% 触发时刻映射
@@ -208,16 +200,9 @@ title('Event-triggering instants');
 grid on
 
 figure(5)
-plot(Ts,cons_err,'LineWidth',1.2); hold on
-yline(eps_cons,'--r','eps');
+plot(Ts,cons_err,'LineWidth',1.2);
 xlabel('time(s)');ylabel('||Lx||_2');
 title('Consensus error');
-grid on
-
-figure(6)
-stairs(Ts,trig_count,'LineWidth',1.2);
-xlabel('time(s)');ylabel('number of triggers per step');
-title('Trigger activity per simulation step');
 grid on
 
 
@@ -323,7 +308,6 @@ tau_w_act = [tu_w; tv_w; tr_w];
 nu_dot = M_act \ (tau_k_act + tau_w_act + F_act_DC);
 
 if ~printed_once
-    fprintf('[ASV1_multi init][id=%d] r=%g, r_dot=%g\n', id, r, nu_dot(3));
     printed_once = true;
 end
 
