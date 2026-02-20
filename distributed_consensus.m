@@ -31,42 +31,43 @@ K = numel(Ts);
 %% 外环固定时间一致性控制（稳态增强）
 alpha_ft = 0.95;        % 0<alpha_ft<1（更接近线性，减小近零抖振）
 beta_ft  = 1.10;        % beta_ft>1（进一步减弱大幅激励）
-k0_ft = 1.05;           % 线性阻尼项（显著增强，提升收敛）
-k1_ft = 0.16;           % 低阶幂项（适中）
-k2_ft = 0.08;           % 高阶幂项（适中）
-u_lim = 0.90;           % 外环速度参考限幅（保证收敛驱动力）
+k0_ft = 0.95;           % 线性阻尼项
+k1_ft = 0.22;           % 低阶幂项
+k2_ft = 0.12;           % 高阶幂项
+u_lim = 0.85;           % 外环速度参考限幅
 
-Tf_u = 0.20;            % 外环指令滤波时间常数
+Tf_u = 0.18;            % 外环指令滤波时间常数
 alpha_u = h/(Tf_u+h);
 u_filt = zeros(1,N);
-du_max = 0.035;         % 每步最大变化量（rate limit）
+du_max = 0.030;         % 每步最大变化量（rate limit）
+k_vel = 0.28;           % 速度阻尼反馈（抑制二阶振荡）
 
 %% 触发参数（前疏后密 + 抗抖）
 line_hi = 0.24;         % 初期阈值（高）
-line_lo = 0.015;        % 后期阈值（提高，减少末段触发）
+line_lo = 0.020;        % 后期阈值（提高，减少末段触发）
 lambda_th = 0.30;       % 阈值衰减速率（更慢）
 
-sigma_rel = 0.022;      % 相对项：th_i = sigma_rel*|x_i| + line(t)
-eta_hys  = 0.45;        % 滞回比例（增大，减抖动）
-z_dead_hi = 0.12;       % 初期死区（更大）
-z_dead_lo = 0.03;       % 后期死区（适中，避免末段抖动）
+sigma_rel = 0.028;      % 相对项：th_i = sigma_rel*|x_i| + line(t)
+eta_hys  = 0.55;        % 滞回比例（增大，减抖动）
+z_dead_hi = 0.14;       % 初期死区（更大）
+z_dead_lo = 0.05;       % 后期死区（适中，避免末段抖动）
 lambda_z = 0.35;        % 死区收缩速率（更慢）
 
-tau_min_hi = 0.24;      % 初期最小触发间隔（更大）
-tau_min_lo = 0.05;      % 后期最小触发间隔（避免过密）
+tau_min_hi = 0.28;      % 初期最小触发间隔（更大）
+tau_min_lo = 0.07;      % 后期最小触发间隔（避免过密）
 lambda_min = 0.22;      % 最小间隔收缩速率（更慢）
 
-tau_max_hi = 1.00;      % 初期最大静默时间（很大：前期稀）
-tau_max_lo = 0.08;      % 后期最大静默时间（适中：后期更密但不过密）
-lambda_tau = 0.45;      % 最大静默时间收缩速率（更平缓）
+tau_max_hi = 1.20;      % 初期最大静默时间（很大：前期稀）
+tau_max_lo = 0.14;      % 后期最大静默时间（后期更密但不过密）
+lambda_tau = 0.38;      % 最大静默时间收缩速率（更平缓）
 
 last_trig = -1e6*ones(1,N);
 armed = true(1,N);
 
 %% ASV内环参数
-k_u_track = 2.4;
-k_r = 3.2;
-k_psi = 2.2;
+k_u_track = 2.6;
+k_r = 3.4;
+k_psi = 2.0;
 k_v = 0.8;
 
 %% 数据存储
@@ -76,6 +77,7 @@ E = zeros(K,N);
 U = zeros(K,N);
 line1 = zeros(K,1);
 cons_err = zeros(K,1);
+cons_evt_gate = 0.9;    % 小误差区主要依赖超时触发，抑制刷屏
 
 T_1=[];T_2=[];T_3=[];T_4=[];T_5=[];T_6=[];
 
@@ -107,7 +109,7 @@ for k = 1:K
 
     % 外环固定时间一致性控制（使用触发保持值 xhat）
     z = (L*xhat.').';
-    u_raw = -k0_ft*z - k1_ft*sig_pow(z, alpha_ft) - k2_ft*sig_pow(z, beta_ft);
+    u_raw = -k0_ft*z - k1_ft*sig_pow(z, alpha_ft) - k2_ft*sig_pow(z, beta_ft) - k_vel*asv_state(:,1).';
     u_cmd = u_lim*tanh(u_raw/u_lim);
 
     % 一阶滤波 + 斜率限制，抑制控制输入振荡
@@ -152,7 +154,8 @@ for k = 1:K
 
         can_check = (dt >= N_min_t);
         near_consensus = abs(z(i)) <= z_dead_t;
-        trig_by_err = can_check && armed(i) && (~near_consensus) && (abs(e(i)) >= th_i);
+        err_enable = (cons_err(k) >= cons_evt_gate) || (dt >= N_max_t);
+        trig_by_err = can_check && armed(i) && (~near_consensus) && err_enable && (abs(e(i)) >= th_i);
         trig_by_timeout = (dt >= N_max_t);
         trig_init = (k == 1);
 
