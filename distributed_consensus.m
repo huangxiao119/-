@@ -47,15 +47,17 @@ lambda_th = 0.42;       % 阈值衰减速率（再放慢）
 
 sigma_rel = 0.016;      % 相对项：th_i = sigma_rel*|x_i| + line(t)
 eta_hys  = 0.30;        % 滞回比例
-z_dead = 0.035;         % 小邻域死区，避免临近一致时误差触发抖动
+z_dead_hi = 0.080;      % 初期死区（大，减少前期误触发）
+z_dead_lo = 0.008;      % 后期死区（小，允许后期更密触发）
+lambda_z = 0.65;        % 死区收缩速率
 
-tau_min_hi = 0.10;      % 初期最小触发间隔（大）
-tau_min_lo = 0.06;      % 后期最小触发间隔（小）
+tau_min_hi = 0.16;      % 初期最小触发间隔（更大）
+tau_min_lo = 0.010;     % 后期最小触发间隔（更小）
 lambda_min = 0.40;      % 最小间隔收缩速率
 
-tau_max_hi = 0.45;      % 初期最大静默时间（大：触发稀）
-tau_max_lo = 0.18;      % 后期最大静默时间（小：触发密）
-lambda_tau = 0.35;      % 最大静默时间收缩速率（放慢）
+tau_max_hi = 0.90;      % 初期最大静默时间（很大：前期非常稀）
+tau_max_lo = 0.020;     % 后期最大静默时间（很小：后期更密）
+lambda_tau = 0.80;      % 最大静默时间收缩速率（加快前稀后密切换）
 
 last_trig = -1e6*ones(1,N);
 armed = true(1,N);
@@ -95,6 +97,9 @@ for k = 1:K
     % 最大静默时间：大->小（前疏后密）
     tau_max_t = tau_max_lo + (tau_max_hi-tau_max_lo)*exp(-lambda_tau*G);
     N_max_t = max(N_min_t+1, ceil(tau_max_t/h));
+
+    % 死区：大->小（前期抑制触发，后期放开）
+    z_dead_t = z_dead_lo + (z_dead_hi-z_dead_lo)*exp(-lambda_z*G);
 
     % 一致性误差
     cons_err(k) = norm(L*x.',2);
@@ -140,7 +145,7 @@ for k = 1:K
         end
 
         can_check = (dt >= N_min_t);
-        near_consensus = abs(z(i)) <= z_dead;
+        near_consensus = abs(z(i)) <= z_dead_t;
         trig_by_err = can_check && armed(i) && (~near_consensus) && (abs(e(i)) >= th_i);
         trig_by_timeout = (dt >= N_max_t);
         trig_init = (k == 1);
