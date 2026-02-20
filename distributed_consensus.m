@@ -29,16 +29,17 @@ Ts = 0:h:t;
 K = numel(Ts);
 
 %% 外环固定时间一致性控制（稳态增强）
-alpha_ft = 0.90;        % 0<alpha_ft<1（提高到接近1，降低近零抖振）
-beta_ft  = 1.20;        % beta_ft>1（减弱大幅激励）
-k0_ft = 0.72;           % 线性阻尼项（增强）
-k1_ft = 0.42;           % 低阶幂项（降低近零高增益）
-k2_ft = 0.24;           % 高阶幂项（降低过冲）
-u_lim = 0.95;           % 外环速度参考限幅（进一步压峰）
+alpha_ft = 0.95;        % 0<alpha_ft<1（更接近线性，减小近零抖振）
+beta_ft  = 1.10;        % beta_ft>1（进一步减弱大幅激励）
+k0_ft = 0.82;           % 线性阻尼项（再增强）
+k1_ft = 0.20;           % 低阶幂项（继续降低）
+k2_ft = 0.10;           % 高阶幂项（继续降低）
+u_lim = 0.75;           % 外环速度参考限幅（进一步压峰）
 
-Tf_u = 0.16;            % 外环指令滤波时间常数（更平滑）
+Tf_u = 0.24;            % 外环指令滤波时间常数（更平滑）
 alpha_u = h/(Tf_u+h);
 u_filt = zeros(1,N);
+du_max = 0.045;         % 每步最大变化量（rate limit）
 
 %% 触发参数（前疏后密 + 抗抖）
 line_hi = 0.24;         % 初期阈值（高）
@@ -63,9 +64,9 @@ last_trig = -1e6*ones(1,N);
 armed = true(1,N);
 
 %% ASV内环参数
-k_u_track = 2.3;
-k_r = 3.0;
-k_psi = 2.4;
+k_u_track = 2.1;
+k_r = 2.8;
+k_psi = 2.6;
 k_v = 0.9;
 
 %% 数据存储
@@ -108,7 +109,12 @@ for k = 1:K
     z = (L*xhat.').';
     u_raw = -k0_ft*z - k1_ft*sig_pow(z, alpha_ft) - k2_ft*sig_pow(z, beta_ft);
     u_cmd = u_lim*tanh(u_raw/u_lim);
-    u_filt = (1-alpha_u)*u_filt + alpha_u*u_cmd;
+
+    % 一阶滤波 + 斜率限制，抑制控制输入振荡
+    u_tar = (1-alpha_u)*u_filt + alpha_u*u_cmd;
+    du = u_tar - u_filt;
+    du = min(max(du, -du_max), du_max);
+    u_filt = u_filt + du;
 
     % ASV 3DOF 推进
     for i = 1:N
